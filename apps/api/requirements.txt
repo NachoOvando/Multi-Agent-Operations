@@ -1,0 +1,10 @@
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+
+# Agentes y servidor HTTP — versión mínima a verificar contra lo disponible
+# al momento de instalar (no hay acceso a internet en esta sesión para
+# confirmar la última versión estable de cada paquete).
+google-adk
+litellm
+fastapi
+uvicorn

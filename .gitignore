@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Node / Next.js (apps/web tiene su propio .gitignore, esto es defensivo a nivel raíz)
+node_modules/
+.next/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
