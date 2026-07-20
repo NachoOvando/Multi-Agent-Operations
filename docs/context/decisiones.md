@@ -46,3 +46,28 @@
 
 **Decisión**: Next.js como frontend (`apps/web/`), Python/FastAPI como backend (`apps/api/`) — sin cambios respecto al estándar global del usuario.
 **Motivo**: confirmado explícitamente; además coherente con la propia regla del usuario ("si toca datos tabulares o procesamiento de archivos → Python").
+
+## google-adk==2.5.0 instalado y validado: API real confirma el diseño documentado
+
+**Decisión**: se instaló `google-adk==2.5.0` de verdad en un venv (`apps/api/.venv`) y se verificó contra la API real (no solo lectura de docs) lo que `docs/architecture.md` marcaba como "a verificar": `Agent` es alias de `LlmAgent`; acepta callables planos en `tools` sin envolverlos manualmente en `FunctionTool`; `model` acepta `LiteLlm(model="anthropic/<modelo>")`; `Runner` tiene `auto_create_session=True` (evita gestionar sesiones de ADK a mano); `Runner.run_async` es un async generator que requiere `user_id`, `session_id`, `new_message=types.Content(role="user", parts=[types.Part(text=...)])`.
+**Motivo**: cerrar la incertidumbre marcada explícitamente como "a verificar" antes de escribir wiring real en `orchestrator.py` y en los 3 `agent.py` de dominio — evitar código especulativo contra una API no confirmada.
+**Resultado**: el diseño previamente documentado (patrón esperado) resultó correcto en todos estos puntos; no hizo falta rediseñar nada, solo reemplazar `NotImplementedError` por la implementación real siguiendo el patrón ya documentado en `docs/architecture.md`.
+
+## DATABASE_URL: prefijo obligatorio `postgresql+psycopg://`
+
+**Decisión**: toda `DATABASE_URL` del proyecto debe usar el prefijo `postgresql+psycopg://` (psycopg v3), nunca `postgresql://` a secas.
+**Motivo**: se detectó instalando `google-adk` de verdad que el prefijo genérico `postgresql://` hace que SQLAlchemy (y el engine async que arma `DatabaseSessionService` de ADK) default a `psycopg2`, que no está instalado en este proyecto (se usa `psycopg[binary]>=3.1` en requirements.txt). El mismo prefijo sirve tanto para el engine sync propio (`db/session.py`) como para el engine async de ADK (`orchestrator.py`) — psycopg v3 soporta ambos modos desde el mismo driver, así que no hace falta duplicar configuración.
+**Documentado en**: `apps/api/src/db/session.py` (docstring) y `apps/api/.env.example` (nuevo archivo, con el valor de ejemplo ya corregido).
+**Descartado**: usar `psycopg2` como driver — hubiera requerido agregarlo a requirements.txt sin necesidad real, cuando psycopg3 ya cubre sync y async.
+
+## litellm pineado a 1.91.4
+
+**Decisión**: `litellm==1.91.4` (versión exacta, no rango) en `requirements.txt`, instalado con `pip install --only-binary=litellm -r requirements.txt`.
+**Motivo**: versiones más nuevas de `litellm` incluyen una extensión nativa en Rust (`litellm-rust`/python-bridge vía `maturin`) que requiere compilar desde source con Cargo + MSVC Build Tools (`link.exe`) — herramientas no instaladas en este entorno Windows. La versión `1.91.4` es la más reciente con wheel precompilado disponible, evitando ese requisito de compilación.
+**Descartado**: instalar Cargo + MSVC Build Tools para poder usar una versión más nueva sin pin — se descartó por ahora para no agregar una dependencia de toolchain pesada al entorno de desarrollo solo para desbloquear una versión de una dependencia transitiva (LiteLlm de ADK). Revisar este pin cuando exista wheel precompilado para una versión más nueva en el entorno de destino real (ver nota en `requirements.txt` y en `docs/context/estado-proyecto.md`).
+
+## Tools de Compras y Planificación: implementados reusando la fuente única de lectura
+
+**Decisión**: se implementaron `agents/compras/tools.py` (`consultar_precios_proveedor`, `registrar_orden_compra`, contra el nuevo `services/purchasing_queries.py`) y `agents/planificacion/tools.py` (`consultar_necesidades`, `registrar_necesidad`). `consultar_necesidades` reusa `services/production_queries.py::get_requirements` — la misma función que ya usa `cross_domain_reads.leer_necesidades_para` — en vez de crear una segunda función de lectura.
+**Motivo**: evitar duplicar "cómo se leen necesidades" en dos lugares (regla dura de CLAUDE.md sobre no mezclar/duplicar lógica de negocio entre dominios), consistente con el mismo patrón ya usado por `stock_queries.get_stock` en Almacén.
+**Estado real**: los permission-checks (`assert_can_perform`) son reales y funcionan; la lectura/escritura de datos sigue en `NotImplementedError` en `purchasing_queries.py` y `production_queries.py` porque el schema de esas tablas sigue diferido (ver decisión "Schema de datos de negocio: diferido al final"). Se actualizó `DOMAIN_ACTIONS[Domain.COMPRAS]` y `DOMAIN_ACTIONS[Domain.PLANIFICACION]` en `permissions_service.py` con las acciones correspondientes — antes estaban vacíos.

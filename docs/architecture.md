@@ -46,14 +46,18 @@ Como el tool-set final de cada dominio es **estático** (fijo por `Domain`, no v
 
 El chequeo de permisos real sigue ocurriendo dentro de cada tool invocado por el agente (fail-closed) — el orquestador solo decide QUÉ agente atiende, nunca reemplaza los checks de `assert_can_perform`/`assert_can_read`.
 
-## Integración con Google ADK (a verificar contra la versión instalada)
+## Integración con Google ADK (validada contra `google-adk==2.5.0` instalado)
 
-Patrón esperado — todavía no instalado en esta sesión, verificar nombres exactos al implementar:
+Instalado y verificado end-to-end en un venv (`apps/api/.venv`) en la sesión de wiring real — ver `docs/context/decisiones.md`. El patrón que antes era "esperado, a verificar" se confirmó exacto contra la API real:
 
-- `from google.adk.agents import Agent` (alias `LlmAgent`) — un `Agent` por dominio, con `tools` = lista de `FunctionTool` (tools propias + lectura cruzada inyectada por el orquestador).
-- `from google.adk.models.lite_llm import LiteLlm` — para usar modelos Claude (`LiteLlm(model="anthropic/claude-...")`), con `ANTHROPIC_API_KEY` en el entorno. LiteLLM no requeriría el SDK `anthropic` instalado aparte.
-- `from google.adk.tools import FunctionTool`, `SessionService`, `Runner` — para ejecutar y persistir conversaciones.
+- `from google.adk.agents import Agent` (alias de `LlmAgent`) — un `Agent` por dominio, construido en `build_agent()` de cada `agents/<dominio>/agent.py`. `tools` acepta **callables planos directamente** (ADK los envuelve internamente) — no hace falta envolverlos a mano en `FunctionTool`.
+- `from google.adk.models.lite_llm import LiteLlm` — para usar modelos Claude (`LiteLlm(model="anthropic/claude-sonnet-5")`), con `ANTHROPIC_API_KEY` en el entorno (`apps/api/.env.example`). LiteLLM no requiere el SDK `anthropic` instalado aparte. Pineado a `litellm==1.91.4` (versión con wheel precompilado — ver decisión en `docs/context/decisiones.md` sobre por qué versiones más nuevas requieren Cargo/MSVC Build Tools no disponibles en este entorno Windows).
+- `from google.adk.tools.tool_context import ToolContext` — cada tool ADK-facing declara `tool_context: ToolContext` como primer parámetro; ADK lo inyecta automáticamente y de ahí sale `tool_context.user_id` (el `operator_id`, seteado por `Runner.run_async(user_id=operator_id, ...)`). Este es el patrón de wrapper usado en los 3 `agent.py`: el wrapper traduce `tool_context` → `operator_id` + sesión de DB de corta duración (`db/session.py::get_session()`) → delega a la función pura de `tools.py` (que no conoce ADK).
+- `from google.adk.sessions import DatabaseSessionService` — persiste sesiones de conversación en la misma Postgres del proyecto (`db_url=DATABASE_URL`, mismo prefijo `postgresql+psycopg://` que el engine sync propio — psycopg v3 soporta sync y async desde el mismo driver).
+- `from google.adk.runners import Runner` — `Runner(agent=, app_name=, session_service=, auto_create_session=True)`. `auto_create_session=True` evita gestionar sesiones de ADK a mano antes de cada consulta. `run_async(user_id=, session_id=, new_message=types.Content(role="user", parts=[types.Part(text=...)]))` es un async generator de `Event`; el orquestador concatena el texto de los `event.content.parts`.
 - Se usa `Runner` como librería dentro de nuestro propio FastAPI (no el helper `get_fast_api_app` de ADK), porque `routers/agents.py` es un router HTTP propio, sin lógica de negocio embebida, consistente con el resto de la arquitectura (capas: router → orquestador/services → db).
+
+**Pendiente, no validado todavía**: una invocación real de `run_async` contra el modelo (requiere `ANTHROPIC_API_KEY` configurada) — lo verificado en esta sesión fue la *construcción* de los 3 `Runner`/`LlmAgent` y la inyección correcta de tools cruzados, no una respuesta real de Claude.
 
 ## Ingesta de datos (diseño conceptual — schema deferido)
 
@@ -100,7 +104,9 @@ apps/
                                      # assert_can_perform, assert_can_read
         cross_domain_reads.py       # única excepción — solo lectura, solo orquestador
         stock_queries.py            # única fuente de "cómo se lee/escribe stock"
-        production_queries.py       # única fuente de "cómo se lee necesidades"
+        production_queries.py       # única fuente de "cómo se lee/escribe necesidades"
+        purchasing_queries.py       # única fuente de precios de proveedor/OCs (propio de Compras,
+                                     # no usado desde cross_domain_reads.py — ver decisiones.md)
         mrp.py                      # cálculo puro, agnóstico de permisos
       db/{models.py, session.py}
       routers/agents.py
@@ -118,9 +124,10 @@ docs/
 
 ## Qué queda pendiente (fuera de este diseño)
 
-- Schema exacto de las tablas de negocio (stock, necesidades, precios) y el pipeline de ingesta de Excel — decisión explícitamente diferida por el usuario.
-- Instalar `google-adk` y reemplazar los `NotImplementedError` de `agent.py`/`orchestrator.py` por la construcción real de `LlmAgent`/`Runner`.
-- Implementar `tools.py` de Compras y Planificación (hoy `DOMAIN_ACTIONS` está vacío para ambos).
+- Schema exacto de las tablas de negocio (stock, necesidades, precios) y el pipeline de ingesta de Excel — decisión explícitamente diferida por el usuario. `stock_queries.py`, `production_queries.py`, `purchasing_queries.py` y `mrp.py` siguen siendo `NotImplementedError` por este motivo — es la única pieza de lógica de negocio que falta, todo el wiring de agentes/permisos/orquestador alrededor ya es real.
+- Endpoint HTTP real en `routers/agents.py` que reciba la consulta del operador y llame `agents/orchestrator.py::handle_query`, y el `lifespan` de `main.py` que pre-construya los Runners al boot (hoy `get_runner_for_domain` los construye lazy en el primer request).
 - Auth.js real (hoy el rol se lee de una tabla `operators` interina en Postgres).
-- Logging de auditoría (operator_id + rol + timestamp) en toda acción mutante — pendiente en `registrar_movimiento`.
+- Logging de auditoría (operator_id + rol + timestamp) en toda acción mutante — pendiente en `registrar_movimiento`, `registrar_orden_compra`, `registrar_necesidad`.
+- Estrategia definitiva de `session_id` de ADK (hoy se usa `operator_id` como `session_id` en `handle_query`, marcado como TODO explícito).
+- Validar una invocación real de `run_async` contra el modelo Claude (requiere `ANTHROPIC_API_KEY`) — solo se validó la construcción de agentes/Runners en esta sesión.
 - Chat real en `apps/web` (hoy es solo scaffold de estructura).

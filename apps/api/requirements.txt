@@ -1,10 +1,17 @@
 sqlalchemy>=2.0
 psycopg[binary]>=3.1
 
-# Agentes y servidor HTTP — versión mínima a verificar contra lo disponible
-# al momento de instalar (no hay acceso a internet en esta sesión para
-# confirmar la última versión estable de cada paquete).
-google-adk
-litellm
-fastapi
-uvicorn
+# Agentes y servidor HTTP. Versiones verificadas por instalación real en esta
+# sesión (Python 3.12, Windows) — ver docs/context/decisiones.md.
+google-adk>=2.5.0
+fastapi>=0.139.0
+uvicorn>=0.51.0
+
+# litellm: PINEADO a una versión con wheel precompilado. Versiones más nuevas
+# incluyen una extensión nativa en Rust (litellm-rust/python-bridge) que
+# requiere Cargo + MSVC Build Tools (link.exe) para compilar desde source —
+# no instalado en este entorno. Instalar con:
+#   pip install --only-binary=litellm -r requirements.txt
+# o actualizar este pin cuando se confirme un wheel para una versión más
+# nueva en el entorno de destino.
+litellm==1.91.4

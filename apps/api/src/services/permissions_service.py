@@ -46,8 +46,8 @@ ROLE_DOMAIN: dict[Role, Domain] = {
 # tools.py de ese dominio — nunca al revés.
 DOMAIN_ACTIONS: dict[Domain, frozenset[str]] = {
     Domain.ALMACEN: frozenset({"consultar_stock", "registrar_movimiento"}),
-    Domain.COMPRAS: frozenset(),
-    Domain.PLANIFICACION: frozenset(),
+    Domain.COMPRAS: frozenset({"consultar_precios_proveedor", "registrar_orden_compra"}),
+    Domain.PLANIFICACION: frozenset({"consultar_necesidades", "registrar_necesidad"}),
 }
 
 # Lectura cruzada de SOLO LECTURA entre dominios — eje de permiso distinto de

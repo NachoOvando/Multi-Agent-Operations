@@ -28,3 +28,23 @@ def get_requirements(material_code: str | None, session: Session) -> list[dict]:
         "Falta definir el modelo de datos de necesidades de producción antes "
         "de implementar esta consulta."
     )
+
+
+def create_requirement(
+    material_code: str,
+    quantity: float,
+    required_date: str,
+    work_order: str,
+    session: Session,
+) -> dict:
+    """Registra una nueva necesidad de producción (una orden de trabajo puntual
+    — distinto de la semántica de carga masiva por Excel, que se decide
+    aparte, ver docstring del módulo).
+
+    TODO: implementar contra la tabla real de necesidades una vez definido
+    el schema.
+    """
+    raise NotImplementedError(
+        "Falta definir el modelo de datos de necesidades de producción antes "
+        "de implementar el registro real."
+    )
