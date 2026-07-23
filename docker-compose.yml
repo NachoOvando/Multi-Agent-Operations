@@ -1,0 +1,29 @@
+# Postgres local para dev/migraciones, sin depender de Railway.
+# Uso: `docker compose up -d db`, después
+# `alembic -c apps/api/alembic.ini upgrade head`.
+#
+# Credenciales de acá son EXCLUSIVAMENTE de desarrollo local (contenedor
+# bindeado a localhost, nunca expuesto) — no representan un secreto real y
+# nunca deben reusarse en staging/prod. DATABASE_URL real de prod siempre
+# sale de una variable de entorno gestionada por el proveedor (Railway),
+# nunca de este archivo.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentes_operativos
+      POSTGRES_PASSWORD: agentes_operativos_dev_only
+      POSTGRES_DB: agentes_operativos
+    ports:
+      - "5432:5432"
+    volumes:
+      - agentes_operativos_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentes_operativos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  agentes_operativos_db_data:

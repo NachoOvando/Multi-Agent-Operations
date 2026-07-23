@@ -29,8 +29,6 @@ crear la sesión de ADK a mano antes de cada consulta.
 
 from __future__ import annotations
 
-import os
-
 from google.adk.runners import Runner
 from google.adk.sessions import DatabaseSessionService
 from google.genai import types
@@ -41,6 +39,7 @@ from apps.api.src.agents.compras.agent import build_agent as build_compras_agent
 from apps.api.src.agents.planificacion.agent import (
     build_agent as build_planificacion_agent,
 )
+from apps.api.src.db.session import get_database_url
 from apps.api.src.services import cross_domain_reads
 from apps.api.src.services.permissions_service import (
     CROSS_DOMAIN_READERS,
@@ -85,13 +84,7 @@ def _build_runners() -> dict[Domain, Runner]:
     (agents/<dominio>/agent.py) + tools de lectura cruzada inyectadas según
     CROSS_DOMAIN_READERS.
     """
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise RuntimeError(
-            "DATABASE_URL no está configurada — no se puede inicializar el "
-            "DatabaseSessionService de ADK (ver db/session.py)."
-        )
-
+    database_url = get_database_url()  # ya normalizada (postgresql+psycopg://)
     session_service = DatabaseSessionService(db_url=database_url)
 
     runners: dict[Domain, Runner] = {}

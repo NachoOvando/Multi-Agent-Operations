@@ -1,11 +1,18 @@
 sqlalchemy>=2.0
 psycopg[binary]>=3.1
+alembic>=1.13
 
 # Agentes y servidor HTTP. Versiones verificadas por instalación real en esta
 # sesión (Python 3.12, Windows) — ver docs/context/decisiones.md.
 google-adk>=2.5.0
 fastapi>=0.139.0
 uvicorn>=0.51.0
+python-multipart
+
+# Auth (Slice 1): JWT propio emitido/verificado por FastAPI + hash de
+# password. bcrypt directo, NO passlib (conflicto conocido passlib+bcrypt>=4.1).
+PyJWT>=2.8
+bcrypt>=4.1
 
 # litellm: PINEADO a una versión con wheel precompilado. Versiones más nuevas
 # incluyen una extensión nativa en Rust (litellm-rust/python-bridge) que
