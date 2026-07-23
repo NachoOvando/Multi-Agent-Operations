@@ -6,10 +6,11 @@ Cada operador (Compras, Almacén, Planificación) conversa con un agente de IA e
 
 ## Stack
 
-- **Frontend**: Next.js + TypeScript (`apps/web/`).
-- **Backend**: Python, FastAPI (`apps/api/src/`).
+- **Frontend**: Next.js + TypeScript (`apps/web/`), hosteado en **Vercel**.
+- **Backend**: Python, FastAPI (`apps/api/src/`), hosteado en **Railway**.
 - **Agentes**: Google ADK (`google-adk`), modelos Claude vía el wrapper `LiteLlm` de ADK (no Gemini).
 - **Datos**: PostgreSQL. Excel/CSV es el formato de **entrada** (ingesta), nunca la fuente de verdad persistente — se normaliza a Postgres. El schema exacto de las tablas de negocio (stock, necesidades, precios) se define al final, después de cerrar el resto del diseño.
+- **Auth**: JWT propio emitido/verificado por FastAPI (identidad) + `permissions_service.py` (autorización) — ver sección "Auth" abajo.
 
 ## Modelo de permisos (dos ejes ortogonales)
 
@@ -59,6 +60,31 @@ Instalado y verificado end-to-end en un venv (`apps/api/.venv`) en la sesión de
 
 **Pendiente, no validado todavía**: una invocación real de `run_async` contra el modelo (requiere `ANTHROPIC_API_KEY` configurada) — lo verificado en esta sesión fue la *construcción* de los 3 `Runner`/`LlmAgent` y la inyección correcta de tools cruzados, no una respuesta real de Claude.
 
+## Auth (identidad vs. autorización — dos ejes distintos)
+
+Autenticación (¿quién es?) y autorización (¿qué puede hacer?) son responsabilidades separadas, en módulos distintos:
+
+- **`apps/api/src/services/auth_service.py`** responde "quién es": `authenticate_operator(username, password, session)` verifica username+password contra `Operator.password_hash` (bcrypt), `issue_access_token(operator)` emite un JWT propio (PyJWT, HS256, claims `{sub: operator_id, role, iat, exp}`, firmado con `JWT_SECRET_KEY`), `decode_access_token(token)` lo valida. Es el único módulo del backend que conoce `JWT_SECRET_KEY`.
+- **`apps/api/src/security/dependencies.py::get_current_operator`** es la única fuente válida de `operator_id`/`role` en cualquier endpoint HTTP protegido — parsea `Authorization: Bearer <token>`, decodifica vía `auth_service`, y devuelve 401 fail-closed ante cualquier ausencia/formato/token inválido. Ningún router acepta `operator_id` como path/query/body param del cliente.
+- **`apps/api/src/services/permissions_service.py`** sigue respondiendo "qué puede hacer" a partir del `operator_id` que sale de `get_current_operator` — su interfaz pública no cambió (cumple la invariante ya documentada desde que existía la tabla interina de operadores: "solo cambia de dónde sale `operator_id`").
+
+**Flujo de login**: `POST /api/auth/login` (`routers/auth.py`, sin lógica propia, delega a `auth_service`) recibe `{username, password}`, devuelve `{access_token, token_type, expires_at, operator: {operator_id, role, domain}}` en caso de éxito, o 401 genérico (sin distinguir "usuario inexistente" de "password incorrecta", mismo espíritu fail-closed que `UnknownOperatorError`) en caso contrario. No hay auto-registro — las cuentas se provisionan con `scripts/create_operator.py` (CLI interactivo, password nunca como argumento de línea de comandos).
+
+**Principio de seguridad central — FastAPI emite y verifica su propio JWT, Next.js nunca lo decodifica**: el JWT que emite `auth_service.issue_access_token` es opaco para el frontend. `apps/web/auth.ts` (Auth.js v5, `CredentialsProvider`) llama `POST /api/auth/login` y, si responde 200, envuelve `access_token` dentro de la sesión cifrada de NextAuth (`session.backendToken`) — sin decodificarlo nunca en Node. El navegador nunca ve ese JWT directamente: solo `apps/web/app/api/backend/[...path]/route.ts` (el proxy BFF, ver "Hosting y deploy" abajo) lo reenvía como `Authorization: Bearer <token>` en cada llamada al backend. Ver decisión completa en `docs/context/decisiones.md`.
+
+**`apps/web/middleware.ts`** protege todas las rutas del frontend salvo `/login` y `/api/auth/*` (gate de "¿hay sesión de NextAuth?"), pero no reimplementa ninguna regla de dominio/rol — eso sigue siendo exclusivamente responsabilidad del backend (`assert_can_perform`/`assert_can_read`).
+
+## Hosting y deploy
+
+**Next.js (`apps/web`) en Vercel; FastAPI+ADK (`apps/api`) en Railway — no el mismo proveedor para ambos.** Motivo: los 3 `Runner` de ADK se construyen una sola vez al boot (`main.py::lifespan`, invoca `get_runner_for_domain` para cada `Domain`) y usan `DatabaseSessionService` con conexión persistente a Postgres — incompatible con funciones serverless de Vercel, que no garantizan proceso persistente entre invocaciones. Railway sí ofrece un proceso long-running. El frontend, en cambio, no tiene estado persistente propio (todo el estado vive en la sesión de NextAuth + el backend), por lo que sí encaja en el modelo serverless de Vercel.
+
+- **`railway.json`** vive en la **raíz** del repo (no en `apps/api/`), porque los imports del backend son absolutos (`from apps.api.src...`) — el Root Directory de Railway debe ser la raíz del monorepo. Build: `pip install -r apps/api/requirements.txt`. Start: `alembic -c apps/api/alembic.ini upgrade head && uvicorn apps.api.src.main:app --host 0.0.0.0 --port $PORT`. Healthcheck: `GET /health` (sin auth, no expone datos).
+- **`.python-version`** (raíz, `3.12`) y **`docker-compose.yml`** (raíz, Postgres local para dev/migraciones sin depender de Railway — credenciales marcadas explícitamente dev-only en el propio archivo).
+- **Vercel**: sin `vercel.json` — Root Directory = `apps/web` se configura en el dashboard de Vercel, no en un archivo del repo.
+- **CORS**: `main.py` restringe `CORSMiddleware` a un único origen (`ALLOWED_ORIGIN` de env) — fail-closed, sin esa variable no se permite ningún origen de browser (nunca `"*"` por default). `allow_credentials=False` porque la auth viaja por header Bearer, no por cookie.
+
+**Proxy BFF, no `rewrites()` de Next.js**: `apps/web/app/api/backend/[...path]/route.ts` es la **única** ruta por la que el navegador llega al backend de Railway. Es un Route Handler (no una reescritura estática de `next.config.ts`) porque necesita ejecutar código server-side por request: lee `auth()` (sesión de NextAuth), y si hay `session.backendToken`, reenvía el request (método/path/query/body, incluido multipart) agregando `Authorization: Bearer <backendToken>` — un `rewrites()` estático no puede inyectar un header de auth dinámico por sesión. Consecuencia directa: `BACKEND_API_URL` es server-only (nunca `NEXT_PUBLIC_*`), usada solo en `auth.ts` y en este proxy; el navegador nunca ve la URL de Railway ni el JWT del backend.
+
 ## Ingesta de datos (diseño conceptual — schema deferido)
 
 Excel/CSV es el formato de entrada de los operadores. Para stock específicamente: **cada carga es una foto completa** que reemplaza el stock vigente (full-replace), no un log acumulativo — así es como suelen exportar los sistemas de control de stock. La semántica de otros archivos (necesidades de Planificación, precios de Compras) todavía no está definida y se decidirá cuando se implemente cada pipeline, sin asumir que sigue el mismo patrón que stock.
@@ -68,38 +94,57 @@ El pipeline (a implementar al final, cuando se cierre el schema): Excel sube →
 ## Capas y flujo de una consulta
 
 ```
-Next.js (apps/web) — chat por dominio
-   │ HTTP
+Navegador — nunca ve la URL de Railway ni el JWT del backend
+   │ HTTP (cookie de sesión NextAuth)
    ▼
-FastAPI routers/agents.py — sin lógica de negocio
+Next.js (apps/web, Vercel) — middleware.ts (gate de sesión)
    │
    ▼
-agents/orchestrator.py — dispatcher determinístico
-   │ (resuelve dominio vía permissions_service, selecciona Runner pre-construido)
+app/api/backend/[...path]/route.ts — proxy BFF
+   │ lee auth() server-side, adjunta Authorization: Bearer <backendToken>
    ▼
-LlmAgent de Google ADK (uno por dominio, boot-time)
-   │ tools propias (agents/<dominio>/tools.py) + lectura cruzada inyectada
-   ▼
-services/*_queries.py, services/cross_domain_reads.py, services/mrp.py
-   ▼
-PostgreSQL (db/models.py, db/session.py)
+FastAPI (apps/api, Railway)
+   │
+   ├── routers/auth.py — POST /api/auth/login (sin lógica propia, delega a auth_service)
+   │      └─ services/auth_service.py — hash/verify password, issue/decode JWT propio
+   │
+   └── routers/agents.py — POST /api/agents/messages, sin lógica de negocio
+          │ Depends(get_current_operator) — única fuente de operator_id (security/dependencies.py)
+          ▼
+       agents/orchestrator.py — dispatcher determinístico
+          │ (resuelve dominio vía permissions_service, selecciona Runner pre-construido en lifespan)
+          ▼
+       LlmAgent de Google ADK (uno por dominio, boot-time)
+          │ tools propias (agents/<dominio>/tools.py) + lectura cruzada inyectada
+          ▼
+       services/*_queries.py, services/cross_domain_reads.py, services/mrp.py
+          ▼
+       PostgreSQL (db/models.py, db/session.py)
 ```
 
 ## Estructura de directorios
 
 ```
+railway.json                        # deploy backend (raíz — imports absolutos from apps.api.src...)
+.python-version                     # 3.12, raíz
+docker-compose.yml                  # Postgres local dev, raíz
 apps/
   api/
     requirements.txt
+    alembic.ini
+    alembic/{env.py, versions/}     # migraciones: baseline operators + campos de auth
     src/
-      main.py                       # FastAPI app, monta routers/
+      main.py                       # FastAPI app, lifespan (boot Runners), CORS, /health, monta routers/
       agents/
         orchestrator.py             # dispatcher determinístico
         base_agent.py
         compras/{agent.py, tools.py, prompts.py}
         almacen/{agent.py, tools.py, prompts.py}
         planificacion/{agent.py, tools.py, prompts.py}
+      security/
+        dependencies.py             # get_current_operator — única fuente de operator_id en endpoints
       services/
+        auth_service.py             # identidad: hash/verify password, issue/decode JWT propio
         permissions_service.py      # Domain, Role, DOMAIN_ACTIONS, CROSS_DOMAIN_READERS,
                                      # assert_can_perform, assert_can_read
         cross_domain_reads.py       # única excepción — solo lectura, solo orquestador
@@ -108,9 +153,22 @@ apps/
         purchasing_queries.py       # única fuente de precios de proveedor/OCs (propio de Compras,
                                      # no usado desde cross_domain_reads.py — ver decisiones.md)
         mrp.py                      # cálculo puro, agnóstico de permisos
-      db/{models.py, session.py}
-      routers/agents.py
-  web/                              # Next.js, scaffold mínimo
+      schemas/{auth.py, agents.py}  # LoginRequest/Response, MessageRequest/Response
+      scripts/create_operator.py    # CLI admin — provisioning de cuentas, sin auto-registro
+      db/{models.py, session.py}    # Operator (username/password_hash), get_db() para Depends()
+      routers/{auth.py, agents.py}  # POST /api/auth/login, POST /api/agents/messages
+    tests/                          # PENDIENTE — no existe todavía (ver estado-proyecto.md)
+  web/                              # Next.js — auth real + proxy BFF (Slice 1), sin chat final todavía
+    auth.ts                         # Auth.js v5, CredentialsProvider contra POST /api/auth/login
+    middleware.ts                   # gate de sesión NextAuth, protege todas las rutas salvo /login
+    app/
+      login/page.tsx
+      api/
+        auth/[...nextauth]/route.ts
+        backend/[...path]/route.ts  # proxy BFF — única vía navegador → backend Railway
+      (chat)/page.tsx               # smoke-test mínimo, no la UI de chat final
+    lib/api-client.ts
+    types/next-auth.d.ts
 docs/
   architecture.md                   # este archivo
   context/
@@ -127,10 +185,11 @@ docs/
 
 ## Qué queda pendiente (fuera de este diseño)
 
-- Schema exacto de las tablas de negocio (stock, necesidades, precios) y el pipeline de ingesta de Excel — decisión explícitamente diferida por el usuario. `stock_queries.py`, `production_queries.py`, `purchasing_queries.py` y `mrp.py` siguen siendo `NotImplementedError` por este motivo — es la única pieza de lógica de negocio que falta, todo el wiring de agentes/permisos/orquestador alrededor ya es real.
-- Endpoint HTTP real en `routers/agents.py` que reciba la consulta del operador y llame `agents/orchestrator.py::handle_query`, y el `lifespan` de `main.py` que pre-construya los Runners al boot (hoy `get_runner_for_domain` los construye lazy en el primer request).
-- Auth.js real (hoy el rol se lee de una tabla `operators` interina en Postgres).
+- Schema exacto de las tablas de negocio (stock, necesidades, precios) y el pipeline de ingesta de Excel — decisión explícitamente diferida por el usuario (Slice 2 del plan, no arrancado todavía). `stock_queries.py`, `production_queries.py`, `purchasing_queries.py` y `mrp.py` siguen siendo `NotImplementedError` por este motivo.
 - Logging de auditoría (operator_id + rol + timestamp) en toda acción mutante — pendiente en `registrar_movimiento`, `registrar_orden_compra`, `registrar_necesidad`.
 - Estrategia definitiva de `session_id` de ADK (hoy se usa `operator_id` como `session_id` en `handle_query`, marcado como TODO explícito).
 - Validar una invocación real de `run_async` contra el modelo Claude (requiere `ANTHROPIC_API_KEY`) — solo se validó la construcción de agentes/Runners en esta sesión.
-- Chat real en `apps/web` (hoy es solo scaffold de estructura).
+- Chat real en `apps/web` (hoy hay auth real + proxy BFF + un smoke-test mínimo, no la UI de chat final).
+- **`apps/api/tests/`** no existe todavía (conftest + tests de `auth_service`/`permissions_service`) — señalado como follow-up inmediato al cierre del Slice 1, sin resolver todavía.
+- **Verificación en runtime real** de `alembic upgrade head` y el boot de `uvicorn` con el `lifespan` nuevo — no ejercitado en vivo por falta de Docker en el sandbox de desarrollo actual (ver `docs/context/decisiones.md`).
+- Deploy real ejecutado contra Railway/Vercel (Slice 3 del plan) — los archivos de configuración existen y fueron relevados, pero no se validó un deploy real todavía.

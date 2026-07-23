@@ -79,3 +79,42 @@
 **Nota de diseño en `frontend-especialista.md`**: usa como referencia conceptual de UI/UX los principios de la librería `ui-ux-pro-max-skill` (GitHub, https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) — explícitamente aclarado como referencia de principios de diseño, no como dependencia instalada en el repo ni como comando/script disponible en el entorno.
 **Descartado**: dejar que `frontend-especialista` corra en paralelo o antes que `backend-especialista` en tareas full-stack — se descartó porque invierte la relación fuente-de-verdad: el contrato (incluida la seguridad) lo define el backend, no la UI.
 **Alcance de este subagente `documentador`**: esta entrada documenta la incorporación de los 3 subagentes de Claude Code y el flujo de trabajo que gobierna su orden de invocación — no implica ningún cambio en el estado real del código de la aplicación (`apps/api`, `apps/web`), por lo que `docs/context/estado-proyecto.md` no se modifica en esta sesión.
+
+## Auth.js real reemplaza la tabla interina — se cierra la decisión previa
+
+**Decisión**: se implementó login real por usuario + password (Slice 1 del plan `necesito-2-subagentes-greedy-lagoon.md`). Esto reemplaza (no solo extiende) la decisión previa "Auth.js: no existe todavía, tabla interina en Postgres" — esa entrada queda revertida/superada, no se edita retroactivamente, se deja constancia acá.
+**Cómo se resolvió sin romper la interfaz pública de `permissions_service.py`**: tal como esa decisión anterior ya anticipaba, "solo cambia de dónde sale `operator_id`" — hoy sale de `Depends(get_current_operator)` (`security/dependencies.py`), que decodifica un JWT, en vez de venir de un parámetro de función sin verificar. `permissions_service.py` no se tocó.
+**Motivo**: cerrar el gap de identidad real — antes `operator_id` era un parámetro de función que nadie verificaba; cualquiera que lo conociera podía hacerse pasar por otro operador porque no había capa HTTP de identidad.
+
+## FastAPI emite y verifica su propio JWT — Next.js nunca lo decodifica
+
+**Decisión**: el backend FastAPI (`services/auth_service.py`) emite y verifica su propio JWT (PyJWT, HS256, `JWT_SECRET_KEY` — solo lo conoce el backend). Next.js/Auth.js nunca decodifica ese token: lo recibe de `POST /api/auth/login`, lo guarda opaco dentro de su propia sesión cifrada de NextAuth (`session.backendToken`), y solo lo reenvía como `Authorization: Bearer <token>` en cada llamada posterior al backend.
+**Motivo**: mantener un único punto de verdad para la identidad del backend, sin que el frontend necesite conocer el secreto de firma ni la lógica de expiración/claims — si mañana cambia el algoritmo o los claims del JWT del backend, Next.js no se entera ni necesita cambiar código, porque nunca lo interpreta, solo lo transporta.
+**Descartado**: decodificar en Python el JWE que produce NextAuth (`session: {strategy: "jwt"}`) para que el backend confíe directamente en la sesión de NextAuth — se descartó porque acoplaría FastAPI al formato/secreto interno de Auth.js (una librería de Node), duplicando la superficie de confianza en dos stacks distintos en vez de tener una sola fuente de identidad (el backend) que el frontend simplemente transporta.
+
+## Next.js va a Vercel, FastAPI+ADK va a Railway
+
+**Decisión**: `apps/web` (Next.js) se hostea en Vercel; `apps/api` (FastAPI + Google ADK) se hostea en Railway.
+**Motivo**: los `Runner` de Google ADK se construyen una sola vez al boot de la aplicación (`main.py::lifespan`) y usan `DatabaseSessionService` con conexión persistente a Postgres — incompatible con funciones serverless de Vercel, que no garantizan proceso persistente entre invocaciones. Railway sí ofrece un proceso long-running, compatible con ese patrón de boot-time construction que ya era parte del diseño previo del orquestador (ver decisión "El orquestador es un dispatcher determinístico").
+**Consecuencia técnica documentada**: `railway.json` vive en la raíz del repo, no en `apps/api/`, porque los imports del backend son absolutos (`from apps.api.src...`) — el Root Directory de Railway debe ser la raíz del monorepo, no `apps/api`.
+**Descartado**: un único hosting para ambas apps (ej. todo en Vercel con funciones serverless para el backend, o todo en Railway) — se descartó porque el frontend Next.js sí encaja bien en el modelo serverless de Vercel (sin estado persistente propio, todo el estado vive en la sesión de NextAuth + el backend), mientras que forzar el backend a serverless hubiera roto la premisa de Runners pre-construidos.
+
+## Proxy BFF en vez de `rewrites()` de Next.js
+
+**Decisión**: `apps/web/app/api/backend/[...path]/route.ts` es un Route Handler propio que actúa de BFF (Backend For Frontend) — lee la sesión de NextAuth server-side y reenvía el request al backend de Railway adjuntando `Authorization: Bearer <backendToken>` dinámicamente por sesión.
+**Motivo**: `rewrites()` de `next.config.ts` (que tenía un TODO explícito antes de esta sesión) es una reescritura estática de URL sin acceso a la sesión del usuario en el momento de la request — no puede inyectar un header `Authorization` distinto por usuario. Un Route Handler sí corre código server-side por request, con acceso a `auth()`, lo que permite adjuntar el JWT correcto de cada sesión antes de reenviar.
+**Consecuencia de seguridad relacionada**: como efecto directo de este diseño, el navegador nunca ve la URL de Railway ni el JWT del backend — toda esa información permanece server-side en Next.js. `BACKEND_API_URL` es server-only (nunca `NEXT_PUBLIC_*`), usada solo en `auth.ts` y en este proxy.
+**Descartado**: `rewrites()` estático de Next.js (única alternativa nativa sin código propio) — se descartó por no poder inyectar el header de auth dinámico por sesión, que es un requisito duro dado el diseño de "backend emite su propio JWT".
+
+## Endpoint de mensajería protegido: `operator_id` nunca sale de un param de cliente
+
+**Decisión**: `POST /api/agents/messages` (antes un TODO vacío en `routers/agents.py`) obtiene `operator_id` exclusivamente de `Depends(get_current_operator)` — nunca de un path param, query param o campo del body. `MessageRequest` (schema del body) no incluye `operator_id`.
+**Motivo**: cerrar explícitamente el vector de suplantación de identidad descrito en el plan — con un `operator_id` de cliente, cualquiera que conociera o adivinara el id de otro operador podía hacerse pasar por él y activar sus permisos de dominio. Con esto, la única forma de establecer identidad es un JWT válido emitido por el propio backend.
+**Alcance no tocado**: `permissions_service.py::assert_can_perform`/`assert_can_read` siguen siendo el único punto real de autorización dentro de cada tool — este cambio es de autenticación (quién es), no reemplaza ni duplica la autorización (qué puede hacer).
+
+## Pendiente explícito de verificación en runtime (no resuelto en esta sesión)
+
+**Decisión**: se deja constancia de que dos verificaciones de runtime del Slice 1 no se pudieron ejercitar en vivo en esta sesión: (1) `alembic -c apps/api/alembic.ini upgrade head` contra una Postgres real, y (2) el boot real de `uvicorn apps.api.src.main:app` (con el `lifespan` nuevo pre-construyendo los 3 Runners). El código de ambos existe y fue relevado directamente (`apps/api/alembic/versions/0001_baseline_operators.py`, `0002_operator_auth_fields.py`, `apps/api/src/main.py::lifespan`), pero no runtime real.
+**Motivo**: Docker no está disponible en el sandbox de desarrollo actual, y `docker-compose.yml` (Postgres local) depende de Docker para levantarse.
+**Acción pendiente, no resuelta acá**: correr manualmente `docker compose up -d db && alembic -c apps/api/alembic.ini upgrade head` y arrancar `uvicorn` en un entorno con Docker antes de considerar el Slice 1 100% verificado en runtime — no alcanza con la verificación estática de código hecha en esta sesión.
+**Alcance de `apps/api/tests/`**: también sigue sin existir el directorio de tests (`conftest.py`, `test_auth_service.py`, `test_permissions_service.py`) mencionado en el plan como parte del cierre del Slice 1 — se señaló explícitamente como "se está agregando ahora en un follow-up inmediato", pero al momento de este relevamiento el directorio no existe todavía en el repo.

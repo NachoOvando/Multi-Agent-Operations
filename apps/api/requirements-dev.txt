@@ -1,0 +1,6 @@
+# Dependencias de test/desarrollo, NO de runtime — no se instalan en el build
+# de Railway (que solo usa requirements.txt, ver railway.json). Instalar con:
+#   pip install -r apps/api/requirements.txt -r apps/api/requirements-dev.txt
+-r requirements.txt
+
+pytest>=8.0
