@@ -120,6 +120,9 @@ docs/
   agents/
     documentador.md
     guardian-arquitectura.md
+    backend-especialista.md         # tareas en apps/api/src — define el contrato de comunicación
+    frontend-especialista.md        # tareas en apps/web — consume el contrato, nunca lo inventa
+    validador-resultados.md         # solo lectura + Bash (tests/build) — cierra el flujo, nunca edita
 ```
 
 ## Qué queda pendiente (fuera de este diseño)
